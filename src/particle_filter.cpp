@@ -30,9 +30,7 @@ void ParticleFilter::init(double x, double y, double theta, double std[]) {
 	normal_distribution<double> dist_y(y, std[1]);
 	normal_distribution<double> dist_theta(theta, std[2]);
 
-	num_particles = 200;
-	particles = vector<Particle>(num_particles);
-	weights = vector<double>(num_particles);
+	num_particles = 20;
 
 	for(int i=0; i<num_particles; i++){
 		Particle p;
@@ -42,8 +40,8 @@ void ParticleFilter::init(double x, double y, double theta, double std[]) {
 		p.theta = dist_theta(gen);
 		p.weight = 1.0;
 
-		particles[i] = p;
-		weights[i] = p.weight;
+		particles.push_back(p);
+		weights.push_back(p.weight);
 	}
 	is_initialized = true;
 }
@@ -61,6 +59,7 @@ void ParticleFilter::prediction(double delta_t, double std_pos[], double velocit
 	normal_distribution<double> dist_theta(0, std_pos[2]);
 
 
+
 	for(int i=0; i<num_particles; i++){
 		Particle p = particles[i];
 
@@ -69,10 +68,15 @@ void ParticleFilter::prediction(double delta_t, double std_pos[], double velocit
 		double sin_theta_plus_yaw = sin(p.theta + yaw_rate*delta_t);
 		double cos_theta_plus_yaw = cos(p.theta + yaw_rate*delta_t);
 
-		p.x = dist_x(gen) + p.x + ((velocity/yaw_rate)*(sin_theta_plus_yaw - sin_theta));
-		p.y = dist_y(gen) + p.y + ((velocity/yaw_rate)*(cos_theta - cos_theta_plus_yaw));
-		p.theta = dist_theta(gen) + p.theta + yaw_rate*delta_t;
-
+		if (fabs(yaw_rate) < 0.0001){
+		    p.x = dist_x(gen) + velocity*delta_t*cos_theta;
+		    p.y = dist_y(gen) + velocity*delta_t*sin_theta;
+		}
+		else{
+			p.x = dist_x(gen) + p.x + ((velocity/yaw_rate)*(sin_theta_plus_yaw - sin_theta));
+			p.y = dist_y(gen) + p.y + ((velocity/yaw_rate)*(cos_theta - cos_theta_plus_yaw));
+			p.theta = dist_theta(gen) + p.theta + yaw_rate*delta_t;
+		}
 		particles[i] = p;
 	}
 }
@@ -121,8 +125,10 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
 
 	//-> Calcualte gaussian
 	auto gaussian =  [std_landmark] (double mu_x, double mu_y, double x_obs, double y_obs){
-		double gauss_norm= (1/(2 * M_PI * std_landmark[0] * std_landmark[1]));
-		double exponent= (pow((x_obs - mu_x),2))/(2 * pow(std_landmark[0],2)) + (pow((y_obs - mu_y),2))/(2 * pow(std_landmark[1],2));
+		double gauss_norm= 1/(2 * M_PI * std_landmark[0] * std_landmark[1]);
+		double exponent= ((x_obs - mu_x) * (x_obs - mu_x)) / (2 * (std_landmark[0] * std_landmark[0])) +
+						 ((y_obs - mu_y) * (y_obs - mu_y)) / (2 * (std_landmark[1] * std_landmark[1]));
+
 		return gauss_norm * exp(-exponent);
 	};
 
@@ -131,42 +137,51 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
 		vector<LandmarkObs> transformed_obs;
 
 		for (LandmarkObs obs : observations){
-			LandmarkObs tr_obs = obs;
+			LandmarkObs tr_obs;
 			tr_obs.x = p.x + (cos(p.theta) * obs.x) + (sin(p.theta) * obs.y);
 			tr_obs.y = p.y - (sin(p.theta) * obs.x) + (cos(p.theta) * obs.y);
+			tr_obs.id = p.id;
 			transformed_obs.push_back(tr_obs);
 		}
 		return transformed_obs;
 	};
 
 	//-> Associate
-	auto associate = [map_landmarks] (vector<LandmarkObs> tr_obs, vector<LandmarkObs>& accosciations){
+	auto associate = [this, map_landmarks] (vector<LandmarkObs> tr_obs, Particle& p){
+
+		std::vector<LandmarkObs> predictions;
+		std::vector<int> associations;
+		std::vector<double> sense_x;
+		std::vector<double> sense_y;
 
 		for(int i=0; i< tr_obs.size(); ++i){
-			double distance = 0;
-			int nearest_index = -1;
+			double min_distance = std::numeric_limits<float>::max();
+			int nearest_id = -1;
+			double nearest_x = 0.0;
+			double nearest_y = 0.0;
 
 			for (int j=0; j< map_landmarks.landmark_list.size(); ++j){
-				if(j == 0){
-					distance = sqrt(pow((tr_obs[i].x - map_landmarks.landmark_list[j].x_f), 2) + pow((tr_obs[i].y - map_landmarks.landmark_list[j].y_f), 2));
-				}
-				else{
-					double new_distance = sqrt(pow((tr_obs[i].x - map_landmarks.landmark_list[j].x_f), 2) + pow((tr_obs[i].y - map_landmarks.landmark_list[j].y_f), 2));
-					if(new_distance < distance){
-						distance = new_distance;
-						nearest_index = j;
-					}
-				}
-			}
-			LandmarkObs association = tr_obs[i];
-			if (nearest_index > -1){
-				association.x = map_landmarks.landmark_list[nearest_index].x_f;
-				association.y = map_landmarks.landmark_list[nearest_index].y_f;
-			}
-			accosciations.push_back(association);
-		}
+				double this_distance = dist(tr_obs[i].x, tr_obs[i].y, map_landmarks.landmark_list[j].x_f, map_landmarks.landmark_list[j].y_f);
 
+				if (this_distance < min_distance){
+					min_distance = this_distance;
+
+					nearest_x = map_landmarks.landmark_list[j].x_f;
+					nearest_y = map_landmarks.landmark_list[j].y_f;
+					nearest_id = map_landmarks.landmark_list[j].id_i;
+				}
+			}
+
+			sense_x.push_back(nearest_x);
+			sense_y.push_back(nearest_y);
+			associations.push_back(nearest_id);
+		}
+		p.sense_x.clear(); p.sense_x = sense_x;
+		p.sense_y.clear(); p.sense_y = sense_y;
+		p.associations.clear(); p.associations = associations;
 	};
+
+	weights.clear();
 
 	//For each particle
 	for(int i=0; i<num_particles; i++){
@@ -174,15 +189,20 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
 		vector<LandmarkObs> tr_obs = transform(particles[i]);
 
 		//Assoctiate
-		vector<LandmarkObs> associations;
-		associate(tr_obs, associations);
+		associate(tr_obs, particles[i]);
 
 		double prob = 1.0;
-		for (int ii=0; ii<tr_obs.size(); ++ii){
-			prob *= gaussian(associations[ii].x, associations[ii].y, tr_obs[ii].x, tr_obs[ii].y);
+
+		for (int ii=0; ii < particles[i].associations.size(); ++ii){
+			double mark_x = particles[i].sense_x[ii];
+			double mark_y = particles[i].sense_y[ii];
+			double weight = gaussian(mark_x, mark_x, tr_obs[ii].x, tr_obs[ii].y);
+			if(weight > 0)
+				prob *= weight;
 		}
 		particles[i].weight = prob;
-		weights[i] = prob;
+		weights.push_back(prob);
+		cout << "Weight 0 -- "<< weights[i] <<endl;
 	}
 }
 
@@ -209,8 +229,9 @@ void ParticleFilter::resample() {
 		resampled.push_back(particles[index]);
 	}
 	particles = resampled;
+	weights.clear();
 	for(int i=0; i<num_particles; i++)
-		weights[i] = particles[i].weight;
+		weights.push_back(particles[i].weight);
 }
 
 Particle ParticleFilter::SetAssociations(Particle particle, std::vector<int> associations, std::vector<double> sense_x, std::vector<double> sense_y)
